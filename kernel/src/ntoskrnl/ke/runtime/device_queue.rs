@@ -20,6 +20,8 @@ pub unsafe extern "win64" fn ke_initialize_device_queue(queue:*mut DeviceQueue){
 unsafe fn device_queue_insert(queue:*mut DeviceQueue,entry:*mut DeviceQueueEntry,key:u32,sorted:bool)->u8{
  if queue.is_null()||entry.is_null(){return 0}
  let _guard=DEVICE_QUEUE_LOCK.lock();
+ // Do not splice an entry twice or into two device queues.
+ if unsafe { (*entry).inserted != 0 } { return 0; }
  if unsafe{(*queue).busy==0}{unsafe{(*queue).busy=1;(*entry).inserted=0;}return 0}
  let head=unsafe{core::ptr::addr_of_mut!((*queue).device_list_head)};
  unsafe{
@@ -43,8 +45,20 @@ unsafe fn device_queue_remove_entry(queue:*mut DeviceQueue,entry:*mut DeviceQueu
  if queue.is_null()||entry.is_null(){return false}
  let _guard=DEVICE_QUEUE_LOCK.lock();
  if unsafe{(*entry).inserted}==0{return false}
+ let head=unsafe{core::ptr::addr_of_mut!((*queue).device_list_head)};
  let link=unsafe{core::ptr::addr_of_mut!((*entry).device_list_entry)};
- unsafe{let prev=(*link).blink;let next=(*link).flink;(*prev).flink=next;(*next).blink=prev;(*link).flink=link;(*link).blink=link;(*entry).inserted=0;}
+ // Confirm that this entry belongs to the supplied queue before unlinking it.
+ let mut cursor=unsafe{(*head).flink};
+ let mut found=false;
+ while !cursor.is_null() && cursor!=head {
+  if cursor==link { found=true; break; }
+  cursor=unsafe{(*cursor).flink};
+ }
+ if !found{return false}
+ unsafe{let prev=(*link).blink;let next=(*link).flink;
+  if prev.is_null()||next.is_null(){return false}
+  (*prev).flink=next;(*next).blink=prev;(*link).flink=link;(*link).blink=link;
+  (*entry).inserted=0;}
  true
 }
 pub unsafe extern "win64" fn ke_remove_entry_device_queue(queue:*mut DeviceQueue,entry:*mut DeviceQueueEntry)->u8{
@@ -78,3 +92,17 @@ pub unsafe extern "win64" fn ke_remove_device_queue(queue:*mut DeviceQueue)->*mu
  unsafe{(*entry).inserted=0;(*queue).hint=entry;}entry
 }
 
+
+#[cfg(test)]
+mod layout_tests {
+ use super::*;
+ #[test]
+ fn device_queue_layout_matches_x64_alignment_contract() {
+  assert_eq!(core::mem::offset_of!(DeviceQueueEntry, device_list_entry), 8);
+  assert_eq!(core::mem::offset_of!(DeviceQueueEntry, sort_key), 24);
+  assert_eq!(core::mem::size_of::<DeviceQueueEntry>(), 32);
+  assert_eq!(core::mem::offset_of!(DeviceQueue, device_list_head), 8);
+  assert_eq!(core::mem::offset_of!(DeviceQueue, lock), 24);
+  assert_eq!(core::mem::size_of::<DeviceQueue>(), 48);
+ }
+}
